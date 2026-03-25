@@ -466,7 +466,7 @@ class Utils:
                 for cdr in sorted_appels:
                     loc = cdr.localisation
                     if not loc or loc == "null":
-                        loc = "null,null,null,null,null"
+                        loc = "null,null,null,null"
                     loc = f"{cdr.loc_area_code}{cdr.loc_cell_id},{loc}"
                     chaine = (
                         f"{cdr.call_date.strftime(self.DATE_FMT)},"
@@ -496,7 +496,7 @@ class Utils:
                 for cdr in sorted_sms:
                     loc = cdr.localisation
                     if not loc or loc == "null":
-                        loc = "null,null,null,null,null"
+                        loc = "null,null,null,null"
                     loc = f"{cdr.loc_area_code}{cdr.loc_cell_id},{loc}"
                     chaine = (
                         f"{cdr.call_date.strftime(self.DATE_FMT)},"
