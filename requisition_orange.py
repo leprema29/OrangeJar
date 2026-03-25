@@ -78,9 +78,9 @@ def get_operator_by_telephone(tel: str) -> str:
     """Détermine l'opérateur à partir du préfixe du numéro."""
     mtn_prefixes = ("67", "650", "651", "652", "653", "654",
                     "680", "681", "682", "683", "684")
-    orange_prefixes = ("69", "655", "656", "657", "658", "659",
+    orange_prefixes = ("69", "64", "655", "656", "657", "658", "659",
                        "685", "686", "687", "688", "689")
-    nexttel_prefixes = ("60", "61", "62", "63", "64", "66")
+    nexttel_prefixes = ("60", "61", "62", "63", "66")
 
     if any(tel.startswith(p) for p in mtn_prefixes):
         return "Mtn"
