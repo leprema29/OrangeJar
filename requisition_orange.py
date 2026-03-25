@@ -105,9 +105,10 @@ def get_localisation_by_cell_id(cell_id: str, numero: str) -> str:
             timeout=10,
         )
         localisation = response.text
-        if "html" in localisation:
+        if not localisation or "html" in localisation:
             return "null"
-        return localisation.replace(";", ",")
+        result = localisation.replace(";", ",")
+        return result if result else "null"
     except Exception:
         return "null"
 
@@ -134,9 +135,11 @@ def get_identification_by_numero(numero: str) -> str:
         return "null"
 
 
-def _increment(d: dict, key: str, value: int = 1):
-    """Incrémente un compteur dans un dictionnaire."""
-    d[key] = d.get(key, 0) + value
+def _n(value):
+    """Convertit None en string 'null' (comme Java le fait)."""
+    if value is None:
+        return "null"
+    return str(value)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -462,8 +465,8 @@ class Utils:
                 )
                 for cdr in sorted_appels:
                     loc = cdr.localisation
-                    if loc == "null":
-                        loc = "null,null,null,null"
+                    if not loc or loc == "null":
+                        loc = "null,null,null,null,null"
                     loc = f"{cdr.loc_area_code}{cdr.loc_cell_id},{loc}"
                     chaine = (
                         f"{cdr.call_date.strftime(self.DATE_FMT)},"
@@ -492,8 +495,8 @@ class Utils:
                 )
                 for cdr in sorted_sms:
                     loc = cdr.localisation
-                    if loc == "null":
-                        loc = "null,null,null,null"
+                    if not loc or loc == "null":
+                        loc = "null,null,null,null,null"
                     loc = f"{cdr.loc_area_code}{cdr.loc_cell_id},{loc}"
                     chaine = (
                         f"{cdr.call_date.strftime(self.DATE_FMT)},"
@@ -552,13 +555,13 @@ class Utils:
                         ident = "null,null,null,null,null"
 
                     slots_values = ",".join(
-                        str(self.numero_correspondant.slots[i].get(key))
+                        _n(self.numero_correspondant.slots[i].get(key))
                         for i in range(12)
                     )
                     chaine = (
-                        f"{self.numero_correspondant.total.get(key)},"
-                        f"{self.numero_correspondant.total_entrant.get(key)},"
-                        f"{self.numero_correspondant.total_sortant.get(key)},"
+                        f"{_n(self.numero_correspondant.total.get(key))},"
+                        f"{_n(self.numero_correspondant.total_entrant.get(key))},"
+                        f"{_n(self.numero_correspondant.total_sortant.get(key))},"
                         f"{key},{ident},{slots_values}"
                     )
                     out.write(chaine + "\n")
@@ -576,15 +579,15 @@ class Utils:
                 )
                 for key, _ in sorted_items:
                     localisation = key
-                    if localisation == "null":
+                    if not localisation or localisation == "null":
                         localisation = "null,null,null,null"
 
                     slots_values = ",".join(
-                        str(self.numero_total.slots[i].get(key))
+                        _n(self.numero_total.slots[i].get(key))
                         for i in range(12)
                     )
                     chaine = (
-                        f"{self.numero_total.total.get(key)},"
+                        f"{_n(self.numero_total.total.get(key))},"
                         f"{localisation},{slots_values}"
                     )
                     out.write(chaine + "\n")
