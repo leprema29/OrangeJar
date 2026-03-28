@@ -10,6 +10,7 @@ Usage:
 import sys
 import os
 import logging
+import traceback
 from datetime import datetime
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -21,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 # URL du service de géolocalisation/identification (réseau interne)
 MAP_SERVICE_BASE_URL = "http://192.168.1.114:8080/MapServices/webresources/service"
+
+# Session HTTP réutilisable (plus efficace que requests.post à chaque appel)
+_session = requests.Session()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -55,7 +59,6 @@ class ImeiTotal:
     slots: dict = field(default_factory=lambda: {i: defaultdict(int) for i in range(12)})
 
     def get_slot(self, hour: int) -> dict:
-        """Retourne le dict de la tranche horaire correspondante."""
         return self.slots[hour // 2]
 
 
@@ -64,7 +67,6 @@ class ImeiTotal:
 # ──────────────────────────────────────────────────────────────
 
 def get_sanitised_number(num: str) -> str:
-    """Supprime le préfixe international camerounais (+237, 00237, 237)."""
     if num.startswith("00237"):
         return num[5:]
     if num.startswith("+237"):
@@ -75,7 +77,6 @@ def get_sanitised_number(num: str) -> str:
 
 
 def get_operator_by_telephone(tel: str) -> str:
-    """Détermine l'opérateur à partir du préfixe du numéro."""
     mtn_prefixes = ("67", "650", "651", "652", "653", "654",
                     "680", "681", "682", "683", "684")
     orange_prefixes = ("69", "64", "655", "656", "657", "658", "659",
@@ -94,11 +95,10 @@ def get_operator_by_telephone(tel: str) -> str:
 
 
 def get_localisation_by_cell_id(cell_id: str, numero: str) -> str:
-    """Appelle le service web interne pour géolocaliser une cellule BTS."""
     operator = get_operator_by_telephone(get_sanitised_number(numero))
     input_data = f"{operator},{cell_id}"
     try:
-        response = requests.post(
+        response = _session.post(
             f"{MAP_SERVICE_BASE_URL}/bts",
             data=input_data,
             headers={"Content-Type": "text/plain"},
@@ -114,12 +114,11 @@ def get_localisation_by_cell_id(cell_id: str, numero: str) -> str:
 
 
 def get_identification_by_numero(numero: str) -> str:
-    """Appelle le service web interne pour identifier un abonné."""
     numero = get_sanitised_number(numero)
     operator = get_operator_by_telephone(numero)
     input_data = f"{operator},{numero}"
     try:
-        response = requests.post(
+        response = _session.post(
             f"{MAP_SERVICE_BASE_URL}/bdi",
             data=input_data,
             headers={"Content-Type": "text/plain"},
@@ -190,7 +189,6 @@ class Utils:
         return get_sanitised_number(num)
 
     def _is_target_number(self, cdr: OrangeBean) -> bool:
-        """Vérifie si le CDR concerne le numéro cible."""
         sn = self._sanitise(self.numero)
         return sn in (
             self._sanitise(cdr.called_number),
@@ -200,16 +198,13 @@ class Utils:
         )
 
     def _update_time_slot(self, imei_total: ImeiTotal, key: str, hour: int):
-        """Incrémente la tranche horaire correspondante."""
         imei_total.get_slot(hour)[key] += 1
 
     def _update_correspondant_slots(self, hour: int, num1: str, num2: str):
-        """Met à jour les tranches horaires pour les 2 correspondants."""
         for num in (num1, num2):
             self._update_time_slot(self.numero_correspondant, num, hour)
 
     def _update_imei(self, cdr: OrangeBean):
-        """Met à jour les stats IMEI."""
         imei = cdr.served_imei
         self.imei_occurrence[imei] += 1
         if imei not in self.imei_first_use or self.imei_first_use[imei] > cdr.call_date:
@@ -218,63 +213,12 @@ class Utils:
             self.imei_last_use[imei] = cdr.call_date
 
     def _update_duree_appel(self, cdr: OrangeBean, correspondant: str):
-        """Met à jour durée d'appel ou nombre de messages."""
         if cdr.call_duration >= 0:
             self.duree_appel[correspondant] += cdr.call_duration
         else:
             self.nombre_message[correspondant] += 1
 
-    def _parse_line(self, line: str) -> Optional[OrangeBean]:
-        """Parse une ligne CSV en OrangeBean."""
-        line = line.replace(";", ",")
-        # Remplacer les champs vides
-        for _ in range(5):
-            line = line.replace(",,", ",null,")
-        if line.endswith(","):
-            line += "null"
-
-        tab = line.split(",")
-        if len(tab) < 14:
-            return None
-
-        cdr = OrangeBean()
-
-        # Date
-        if tab[0] not in ("null", ""):
-            try:
-                cdr.call_date = datetime.strptime(tab[0], self.DATE_FMT)
-            except ValueError:
-                return None
-
-        # Durée selon le type d'enregistrement
-        if tab[9] == "0000":
-            if tab[1] not in ("null", ""):
-                cdr.call_duration = int(tab[1])
-            else:
-                cdr.call_duration = -1
-        elif tab[9] == "0007":
-            cdr.call_duration = -1
-
-        cdr.call_reference = tab[2]
-        cdr.called_imsi = tab[3]
-        cdr.called_number = tab[4]
-        cdr.calling_number = tab[5]
-        cdr.loc_area_code = tab[6]
-        cdr.loc_cell_id = tab[7]
-        cdr.origination = tab[8]
-        cdr.record_type = tab[9]
-        cdr.roaming_number = tab[10]
-        cdr.served_imei = tab[11]
-        cdr.served_imsi = tab[12]
-        cdr.served_msisdn = tab[13]
-        cdr.localisation = get_localisation_by_cell_id(
-            tab[6] + tab[7], self.numero
-        )
-
-        return cdr
-
-    def _process_sms(self, cdr: OrangeBean, tab: list[str]):
-        """Traite un enregistrement SMS (recordType = 0007)."""
+    def _process_sms(self, cdr: OrangeBean, tab: list):
         cdr.localisation = get_localisation_by_cell_id(
             tab[6] + tab[7], self._sanitise(cdr.served_msisdn)
         )
@@ -310,8 +254,7 @@ class Utils:
         if self._sanitise(cdr.served_msisdn) == sn:
             self._update_imei(cdr)
 
-    def _process_appel(self, cdr: OrangeBean, tab: list[str]):
-        """Traite un enregistrement d'appel (recordType = 0000)."""
+    def _process_appel(self, cdr: OrangeBean, tab: list):
         cdr.localisation = get_localisation_by_cell_id(
             tab[6] + tab[7], self._sanitise(cdr.calling_number)
         )
@@ -347,8 +290,7 @@ class Utils:
         if self._sanitise(cdr.calling_number) == sn:
             self._update_imei(cdr)
 
-    def _process_appel_entrant(self, cdr: OrangeBean, tab: list[str]):
-        """Traite un appel entrant (recordType = 0001) d'un opérateur non-Orange."""
+    def _process_appel_entrant(self, cdr: OrangeBean, tab: list):
         opera = get_operator_by_telephone(self._sanitise(cdr.calling_number))
         if opera == "Orange":
             return
@@ -389,41 +331,85 @@ class Utils:
             self._update_imei(cdr)
 
     def analyse_listing(self):
-        """Méthode principale : parse le fichier et génère les rapports."""
+        """Méthode principale : parse le fichier et génère les rapports.
+        Calqué sur le comportement Java : si la lecture échoue, on continue
+        quand même à écrire les fichiers de sortie.
+        """
+        df = self.DATE_FMT
+
         # ── Phase 1 : Lecture et analyse du fichier CDR ──
+        # Comme en Java : try/catch autour de la lecture, puis écriture dans tous les cas
         try:
-            with open(self.input_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("CALLDATE"):
-                        continue
+            with open(self.input_file, "r", encoding="utf-8", errors="replace") as f:
+                try:
+                    for line in f:
+                        line = line.strip()
+                        if not line or line.startswith("CALLDATE"):
+                            continue
 
-                    cdr = self._parse_line(line)
-                    if cdr is None:
-                        continue
+                        # Nettoyage de la ligne (identique au Java)
+                        line = line.replace(";", ",")
+                        line = line.replace(",,", ",null,")
+                        line = line.replace(",,", ",null,")
+                        line = line.replace(",,", ",null,")
+                        line = line.replace(",,", ",null,")
+                        line = line.replace(",,", ",null,")
+                        if line.endswith(","):
+                            line += "null"
 
-                    if not self._is_target_number(cdr):
-                        continue
+                        tab = line.split(",")
+                        if len(tab) < 14:
+                            continue
 
-                    tab = line.replace(";", ",")
-                    for _ in range(5):
-                        tab = tab.replace(",,", ",null,")
-                    if tab.endswith(","):
-                        tab += "null"
-                    tab = tab.split(",")
+                        cdr = OrangeBean()
 
-                    if cdr.record_type == "0007":
-                        self._process_sms(cdr, tab)
-                    elif cdr.record_type == "0000":
-                        self._process_appel(cdr, tab)
-                    elif cdr.record_type == "0001":
-                        self._process_appel_entrant(cdr, tab)
+                        # Date
+                        if tab[0] not in ("null", ""):
+                            cdr.call_date = datetime.strptime(tab[0], df)
 
+                        # Durée selon le type
+                        if tab[9] == "0000":
+                            if tab[1] not in ("null", ""):
+                                cdr.call_duration = int(tab[1])
+                            else:
+                                cdr.call_duration = -1
+                        elif tab[9] == "0007":
+                            cdr.call_duration = -1
+
+                        cdr.call_reference = tab[2]
+                        cdr.called_imsi = tab[3]
+                        cdr.called_number = tab[4]
+                        cdr.calling_number = tab[5]
+                        cdr.loc_area_code = tab[6]
+                        cdr.loc_cell_id = tab[7]
+                        cdr.origination = tab[8]
+                        cdr.record_type = tab[9]
+                        cdr.roaming_number = tab[10]
+                        cdr.served_imei = tab[11]
+                        cdr.served_imsi = tab[12]
+                        cdr.served_msisdn = tab[13]
+                        cdr.localisation = get_localisation_by_cell_id(
+                            tab[6] + tab[7], self.numero
+                        )
+
+                        if not self._is_target_number(cdr):
+                            continue
+
+                        if cdr.record_type == "0007":
+                            self._process_sms(cdr, tab)
+                        elif cdr.record_type == "0000":
+                            self._process_appel(cdr, tab)
+                        elif cdr.record_type == "0001":
+                            self._process_appel_entrant(cdr, tab)
+
+                except (ValueError, KeyError) as ex:
+                    # Comme Java : ParseException stoppe la boucle
+                    logger.error("Erreur parsing: %s", ex)
         except IOError as ex:
             logger.error("Erreur lecture fichier: %s", ex)
-            return
 
         # ── Phase 2 : Écriture des fichiers de sortie ──
+        # Comme Java : on écrit TOUJOURS les fichiers, même si la lecture a échoué
         self._write_identite_numero()
         self._write_appels()
         self._write_sms()
@@ -458,12 +444,9 @@ class Utils:
         try:
             os.makedirs(os.path.dirname(self.appel_emis_file), exist_ok=True)
             with open(self.appel_emis_file, "a", encoding="utf-8") as out:
-                sorted_appels = sorted(
-                    self.listing_appel,
-                    key=lambda c: c.call_date,
-                    reverse=True,
-                )
-                for cdr in sorted_appels:
+                self.listing_appel.sort(key=lambda c: c.call_date)
+                self.listing_appel.reverse()
+                for cdr in self.listing_appel:
                     loc = cdr.localisation
                     if not loc or loc == "null":
                         loc = "null,null,null,null"
@@ -488,12 +471,9 @@ class Utils:
         try:
             os.makedirs(os.path.dirname(self.sms_file), exist_ok=True)
             with open(self.sms_file, "a", encoding="utf-8") as out:
-                sorted_sms = sorted(
-                    self.listing_sms,
-                    key=lambda c: c.call_date,
-                    reverse=True,
-                )
-                for cdr in sorted_sms:
+                self.listing_sms.sort(key=lambda c: c.call_date)
+                self.listing_sms.reverse()
+                for cdr in self.listing_sms:
                     loc = cdr.localisation
                     if not loc or loc == "null":
                         loc = "null,null,null,null"
